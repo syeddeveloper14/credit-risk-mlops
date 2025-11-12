@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "credit-risk-mlops"
+version = "1.0.0"
+description = "Complete ML lifecycle for credit default prediction: data contracts, feature pipelines, WoE scorecard and gradient boosting, hyperparameter search, experiment tracking, model registry, champion/challenger promotion, serving and drift-triggered retraining."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "YOUR_NAME" }]
+keywords = ["mlops", "credit-risk", "scorecard", "model-registry", "machine-learning"]
+dependencies = [
+  "numpy>=1.24",
+  "pandas>=2.0",
+  "scikit-learn>=1.3",
+  "scipy>=1.10",
+  "joblib>=1.3",
+  "pyyaml>=6.0",
+  "matplotlib>=3.7",
+  "pydantic>=2.5",
+  "fastapi>=0.110",
+  "uvicorn>=0.27",
+]
