@@ -1,0 +1,71 @@
+# Lifecycle pipeline configuration. Paths are relative to paths.root.
+
+data:
+  source: synthetic              # "synthetic" or "file" (Kaggle cs-training.csv)
+  path: data/raw/cs-training.csv
+  n_synthetic: 30000
+  seed: 7
+
+paths:
+  root: .
+  interim: data/interim
+  processed: data/processed
+  artifacts: artifacts
+  reports: reports
+  cache: .pipeline_cache
+
+validation:
+  min_rows: 1000
+  target_rate_range: [0.01, 0.30]
+  max_null_rate:
+    monthly_income: 0.30
+    dependents: 0.05
+  max_out_of_range_rate: 0.01
+
+split:
+  valid_size: 0.2
+  test_size: 0.2
+  seed: 42
+
+hpo:
+  n_trials: 25                   # per candidate; the default params are always trial 0
+  cv_folds: 3
+  timeout_s: 600
+  seed: 42
+
+models:
+  candidates: [scorecard, logistic, hgb]   # add lightgbm after `pip install .[lightgbm]`
+  selection_metric: roc_auc
+
+scoring:                         # PD -> score and decision bands
+  pdo: 20
+  base_score: 600
+  base_odds: 50
+  approve_below_pd: 0.05
+  decline_above_pd: 0.20
+
+promotion:                       # all gates must pass for Production
+  min_auc: 0.75
+  min_auc_improvement: 0.002
+  max_ece: 0.03
+  max_score_psi: 0.10
+  max_age_auc_gap: 0.10
+  min_approval_ratio: 0.80
+
+tracking:
+  backend: local                 # "local" (JSON files) or "mlflow"
+  uri: mlruns_local              # MLflow: e.g. http://localhost:5000
+  experiment: credit-risk
+
+registry:
+  root: model_registry
+  model_name: credit-default
+
+monitoring:
+  psi_warn: 0.10
+  psi_alert: 0.25
+  max_auc_drop: 0.03
+  min_labels_for_performance: 500
+  prediction_log: logs/predictions.jsonl
+
+seed: 42
