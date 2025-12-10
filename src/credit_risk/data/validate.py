@@ -69,3 +69,74 @@ def validate(
 
     missing = [c for c in [ID, *FEATURES] if c not in df.columns]
     add(
+        Check(
+            "required columns present",
+            not missing,
+            True,
+            f"missing: {missing}" if missing else "ok",
+        )
+    )
+    if missing:
+        return report
+
+    non_numeric = [c for c in FEATURES if not pd.api.types.is_numeric_dtype(df[c])]
+    add(Check("feature columns numeric", not non_numeric, True, str(non_numeric) or "ok"))
+
+    add(
+        Check(
+            "minimum row count",
+            len(df) >= cfg.min_rows,
+            True,
+            f"{len(df)} rows (min {cfg.min_rows})",
+        )
+    )
+    dup = int(df[ID].duplicated().sum())
+    add(Check("unique applicant ids", dup == 0, True, f"{dup} duplicates"))
+
+    if require_target:
+        if TARGET not in df.columns:
+            add(Check("target present", False, True, "target column missing"))
+        else:
+            values = set(df[TARGET].dropna().unique())
+            add(Check("target is binary", values <= {0, 1}, True, f"values {sorted(values)}"))
+            rate = float(df[TARGET].mean())
+            lo, hi = cfg.target_rate_range
+            add(
+                Check(
+                    "target rate in expected range",
+                    lo <= rate <= hi,
+                    True,
+                    f"{rate:.4f} (expected {lo}-{hi})",
+                )
+            )
+
+    for spec in CONTRACT:
+        col = df[spec.name]
+        null_rate = float(col.isna().mean())
+        limit = cfg.max_null_rate.get(spec.name, 0.0 if not spec.nullable else 1.0)
+        add(
+            Check(
+                f"{spec.name}: null rate",
+                null_rate <= limit,
+                True,
+                f"{null_rate:.4f} (max {limit})",
+            )
+        )
+        values = col.dropna()
+        if spec.name in PAST_DUE:
+            values = values[~values.isin(SENTINEL_VALUES)]
+        out = ((values < spec.minimum) | (values > spec.maximum)).mean() if len(values) else 0.0
+        add(
+            Check(
+                f"{spec.name}: range [{spec.minimum}, {spec.maximum}]",
+                out <= cfg.max_out_of_range_rate,
+                False,
+                f"{out:.4%} out of range",
+            )
+        )
+        if (values < 0).any():
+            add(Check(f"{spec.name}: non-negative", False, True, "negative values found"))
+
+    sentinel_rows = int(df[PAST_DUE].isin(SENTINEL_VALUES).any(axis=1).sum())
+    add(Check("past-due sentinel codes", True, False, f"{sentinel_rows} rows with codes 96/98"))
+    return report
