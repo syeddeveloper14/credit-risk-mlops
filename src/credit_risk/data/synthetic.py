@@ -50,3 +50,29 @@ def simulate_applicants(n: int = 30_000, seed: int = 7, drift: float = 0.0) -> p
 
     logit = (
         -3.4
+        + 1.25 * z
+        + 0.55 * np.minimum(late_90, 5)
+        + 0.25 * np.minimum(late_60_89, 5)
+        + 0.8 * (utilization > 0.9)
+        - 0.15 * np.log1p(np.where(income_missing, 5400, income)) / np.log(5400)
+        + 2.0 * sentinel
+    )
+    target = (rng.random(n) < _sigmoid(logit)).astype(int)
+
+    df = pd.DataFrame(
+        {
+            "SeriousDlqin2yrs": target,
+            "RevolvingUtilizationOfUnsecuredLines": utilization,
+            "age": age,
+            "NumberOfTime30-59DaysPastDueNotWorse": late_30_59,
+            "DebtRatio": debt_ratio,
+            "MonthlyIncome": np.where(income_missing, np.nan, income),
+            "NumberOfOpenCreditLinesAndLoans": open_lines,
+            "NumberOfTimes90DaysLate": late_90,
+            "NumberRealEstateLoansOrLines": real_estate,
+            "NumberOfTime60-89DaysPastDueNotWorse": late_60_89,
+            "NumberOfDependents": np.where(dependents_missing, np.nan, dependents),
+        }
+    )
+    df.index = pd.RangeIndex(1, n + 1)
+    return df
