@@ -55,3 +55,60 @@ class WoEBinner(BaseEstimator, TransformerMixin):
         self.max_bins = max_bins
         self.min_bin_share = min_bin_share
         self.monotonic = monotonic
+        self.min_iv = min_iv
+        self.smoothing = smoothing
+
+    # ------------------------------------------------------------------ fitting
+    def _fit_column(self, x: np.ndarray, y: np.ndarray) -> ColumnBins:
+        nan = np.isnan(x)
+        xv, yv = x[~nan], y[~nan]
+        if len(xv) == 0:
+            edges = np.array([])
+        else:
+            quantiles = np.linspace(0, 1, self.max_bins + 1)[1:-1]
+            edges = np.unique(np.quantile(xv, quantiles))
+            # Drop edges equal to the maximum: they would create an empty last bin.
+            edges = edges[edges < xv.max()]
+
+        min_count = self.min_bin_share * len(x)
+        while len(edges) > 0:
+            bins = np.searchsorted(edges, xv, side="left")
+            total, bads = _counts(bins, yv, len(edges) + 1)
+            small = np.flatnonzero(total < min_count)
+            if len(small):
+                i = int(small[np.argmin(total[small])])
+                # merge with the neighbour (drop the edge on the side with fewer rows)
+                if i == 0:
+                    edges = np.delete(edges, 0)
+                elif i == len(total) - 1:
+                    edges = np.delete(edges, i - 1)
+                else:
+                    edges = np.delete(edges, i - 1 if total[i - 1] <= total[i + 1] else i)
+                continue
+            if not self.monotonic:
+                break
+            rates = bads / np.maximum(total, 1)
+            increasing = (
+                np.corrcoef(np.arange(len(rates)), rates)[0, 1] >= 0 if len(rates) > 2 else True
+            )
+            if _is_monotonic(rates, increasing):
+                break
+            d = np.diff(rates)
+            violations = np.flatnonzero(d < 0) if increasing else np.flatnonzero(d > 0)
+            edges = np.delete(edges, int(violations[0]))
+
+        n_bins = len(edges) + 1
+        bins = np.searchsorted(edges, xv, side="left")
+        total, bads = _counts(bins, yv, n_bins)
+        goods = total - bads
+        miss_total, miss_bads = float(nan.sum()), float(y[nan].sum())
+        miss_goods = miss_total - miss_bads
+
+        s = self.smoothing
+        k = n_bins + (1 if miss_total else 0)
+        all_goods = goods.sum() + miss_goods
+        all_bads = bads.sum() + miss_bads
+        dist_g = (goods + s) / (all_goods + s * k)
+        dist_b = (bads + s) / (all_bads + s * k)
+        woe = np.log(dist_g / dist_b)
+        iv = float(np.sum((dist_g - dist_b) * woe))
