@@ -112,3 +112,60 @@ class WoEBinner(BaseEstimator, TransformerMixin):
         dist_b = (bads + s) / (all_bads + s * k)
         woe = np.log(dist_g / dist_b)
         iv = float(np.sum((dist_g - dist_b) * woe))
+        woe_missing = 0.0
+        if miss_total:
+            mg = (miss_goods + s) / (all_goods + s * k)
+            mb = (miss_bads + s) / (all_bads + s * k)
+            woe_missing = float(np.log(mg / mb))
+            iv += float((mg - mb) * woe_missing)
+
+        lows = np.r_[-np.inf, edges]
+        highs = np.r_[edges, np.inf]
+        labels = [f"({lo:.4g}, {hi:.4g}]" for lo, hi in zip(lows, highs, strict=True)]
+        table = pd.DataFrame(
+            {
+                "bin": labels,
+                "count": total,
+                "bads": bads,
+                "bad_rate": bads / np.maximum(total, 1),
+                "woe": woe,
+            }
+        )
+        if miss_total:
+            table.loc[len(table)] = [
+                "missing",
+                miss_total,
+                miss_bads,
+                miss_bads / miss_total,
+                woe_missing,
+            ]
+        return ColumnBins(edges=edges, woe=woe, woe_missing=woe_missing, iv=iv, table=table)
+
+    def fit(self, X: pd.DataFrame, y) -> WoEBinner:
+        y = np.asarray(y, dtype=float)
+        self.bins_ = {c: self._fit_column(X[c].to_numpy(dtype=float), y) for c in X.columns}
+        self.iv_ = {c: b.iv for c, b in self.bins_.items()}
+        self.selected_ = [c for c in X.columns if self.iv_[c] >= self.min_iv]
+        if not self.selected_:
+            raise ValueError("No feature reaches min_iv; lower the threshold")
+        self.feature_names_in_ = np.asarray(X.columns, dtype=object)
+        return self
+
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        return pd.DataFrame(
+            {c: self.bins_[c].transform(X[c].to_numpy(dtype=float)) for c in self.selected_},
+            index=X.index,
+        )
+
+    def get_feature_names_out(self, input_features=None):
+        return np.asarray(self.selected_, dtype=object)
+
+    def iv_table(self) -> pd.DataFrame:
+        frame = pd.DataFrame({"iv": self.iv_}).sort_values("iv", ascending=False)
+        frame["selected"] = frame.index.isin(self.selected_)
+        frame["strength"] = pd.cut(
+            frame["iv"],
+            [-np.inf, 0.02, 0.1, 0.3, 0.5, np.inf],
+            labels=["useless", "weak", "medium", "strong", "suspicious"],
+        )
+        return frame
