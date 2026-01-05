@@ -50,3 +50,55 @@ class CreditFeatures(_FrameTransformer):
     """Domain features. Stateless: nothing is learned from the data."""
 
     def fit(self, X: pd.DataFrame, y=None):
+        X = self._check(X)
+        self.feature_names_out_ = list(self.transform(X.head(1)).columns)
+        return self
+
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        X = self._check(X).copy()
+        income = X["monthly_income"]
+        missing_income = income.isna()
+        X["income_missing"] = missing_income.astype(int)
+        # When income is missing, the public data stores debt in dollars in debt_ratio.
+        X["debt_ratio_clean"] = X["debt_ratio"].where(~missing_income)
+        X["monthly_debt"] = X["debt_ratio_clean"] * income
+        X["income_per_person"] = income / (X["dependents"].fillna(0) + 1)
+        X["total_past_due"] = X[PAST_DUE].sum(axis=1, min_count=1)
+        X["any_90_late"] = (X["late_90"].fillna(0) > 0).astype(int)
+        X["utilization_over_1"] = (X["revolving_utilization"] > 1).astype(int)
+        X["lines_per_decade"] = X["open_credit_lines"] / (X["age"].clip(lower=18) / 10)
+        return X
+
+
+class QuantileClipper(_FrameTransformer):
+    """Winsorise numeric columns at quantiles learned on the training data."""
+
+    def __init__(self, lower: float = 0.0, upper: float = 0.995):
+        self.lower = lower
+        self.upper = upper
+
+    def fit(self, X: pd.DataFrame, y=None):
+        X = self._check(X)
+        self.bounds_ = {
+            c: (float(X[c].quantile(self.lower)), float(X[c].quantile(self.upper)))
+            for c in X.columns
+            if X[c].nunique(dropna=True) > 2  # leave flags alone
+        }
+        self.feature_names_out_ = list(X.columns)
+        return self
+
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        X = self._check(X).copy()
+        for col, (lo, hi) in self.bounds_.items():
+            X[col] = X[col].clip(lo, hi)
+        return X
+
+
+def make_preprocessor() -> Pipeline:
+    return Pipeline(
+        [
+            ("sentinels", SentinelToNaN()),
+            ("features", CreditFeatures()),
+            ("clip", QuantileClipper()),
+        ]
+    )
