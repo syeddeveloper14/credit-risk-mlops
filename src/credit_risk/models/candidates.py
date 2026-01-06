@@ -40,3 +40,46 @@ SEARCH_SPACES: dict[str, dict[str, tuple]] = {
 
 DEFAULT_PARAMS: dict[str, dict[str, Any]] = {
     "scorecard": {"max_bins": 8, "min_bin_share": 0.05, "C": 1.0},
+    "logistic": {"C": 1.0},
+    "hgb": {
+        "learning_rate": 0.05,
+        "max_iter": 300,
+        "max_leaf_nodes": 31,
+        "min_samples_leaf": 100,
+        "l2_regularization": 1.0,
+    },
+    "lightgbm": {
+        "learning_rate": 0.05,
+        "n_estimators": 300,
+        "num_leaves": 31,
+        "min_child_samples": 100,
+        "reg_lambda": 1.0,
+        "colsample_bytree": 0.8,
+    },
+}
+
+
+def build_model(name: str, params: dict[str, Any] | None = None, seed: int = 42) -> Pipeline:
+    """Preprocessing + estimator as one pipeline (the unit that gets versioned and served)."""
+    if name not in SEARCH_SPACES:
+        raise ValueError(f"Unknown model {name!r}; choose from {sorted(SEARCH_SPACES)}")
+    p = {**DEFAULT_PARAMS[name], **(params or {})}
+    if name == "scorecard":
+        estimator = ScorecardModel(**p)
+    elif name == "logistic":
+        estimator = make_pipeline(
+            SimpleImputer(strategy="median", add_indicator=True),
+            StandardScaler(),
+            LogisticRegression(C=p["C"], max_iter=2000),
+        )
+    elif name == "hgb":
+        estimator = HistGradientBoostingClassifier(**p, random_state=seed)
+    else:
+        try:
+            from lightgbm import LGBMClassifier
+        except ImportError as exc:  # pragma: no cover - optional dependency
+            raise ImportError("pip install 'credit-risk-mlops[lightgbm]'") from exc
+        estimator = LGBMClassifier(
+            **p, subsample=0.8, subsample_freq=1, random_state=seed, verbose=-1
+        )
+    return Pipeline([("prep", make_preprocessor()), ("model", estimator)])
