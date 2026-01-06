@@ -38,3 +38,43 @@ class ScoreScaling:
     @property
     def offset(self) -> float:
         return self.base_score - self.factor * np.log(self.base_odds)
+
+    def score_from_pd(self, pd_bad: np.ndarray) -> np.ndarray:
+        p = np.clip(np.asarray(pd_bad, dtype=float), 1e-9, 1 - 1e-9)
+        return self.offset + self.factor * np.log((1 - p) / p)
+
+    def pd_from_score(self, score: np.ndarray) -> np.ndarray:
+        odds_good = np.exp((np.asarray(score, dtype=float) - self.offset) / self.factor)
+        return 1 / (1 + odds_good)
+
+
+class ScorecardModel(BaseEstimator, ClassifierMixin):
+    def __init__(
+        self,
+        max_bins: int = 8,
+        min_bin_share: float = 0.05,
+        min_iv: float = 0.02,
+        C: float = 1.0,
+    ):
+        self.max_bins = max_bins
+        self.min_bin_share = min_bin_share
+        self.min_iv = min_iv
+        self.C = C
+
+    def fit(self, X: pd.DataFrame, y) -> ScorecardModel:
+        self.binner_ = WoEBinner(
+            max_bins=self.max_bins, min_bin_share=self.min_bin_share, min_iv=self.min_iv
+        ).fit(X, y)
+        W = self.binner_.transform(X)
+        self.lr_ = LogisticRegression(C=self.C, max_iter=2000).fit(W, np.asarray(y))
+        self.classes_ = self.lr_.classes_
+        self.feature_names_in_ = np.asarray(X.columns, dtype=object)
+        return self
+
+    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        return self.lr_.predict_proba(self.binner_.transform(X))
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        return self.classes_[(self.predict_proba(X)[:, 1] >= 0.5).astype(int)]
+
+    # ----------------------------------------------------------------- points
