@@ -78,3 +78,44 @@ class ScorecardModel(BaseEstimator, ClassifierMixin):
         return self.classes_[(self.predict_proba(X)[:, 1] >= 0.5).astype(int)]
 
     # ----------------------------------------------------------------- points
+    def _coef(self) -> dict[str, float]:
+        return dict(zip(self.binner_.selected_, self.lr_.coef_[0], strict=True))
+
+    def points(self, X: pd.DataFrame, scaling: ScoreScaling) -> pd.DataFrame:
+        """Points per characteristic for each applicant; row sums equal the score."""
+        W = self.binner_.transform(X)
+        coef = self._coef()
+        n = len(coef)
+        base = (scaling.offset - scaling.factor * self.lr_.intercept_[0]) / n
+        return pd.DataFrame(
+            {c: -scaling.factor * coef[c] * W[c] + base for c in coef}, index=X.index
+        )
+
+    def credit_score(self, X: pd.DataFrame, scaling: ScoreScaling) -> np.ndarray:
+        return self.points(X, scaling).sum(axis=1).to_numpy()
+
+    def points_table(self, scaling: ScoreScaling) -> pd.DataFrame:
+        coef = self._coef()
+        n = len(coef)
+        base = (scaling.offset - scaling.factor * self.lr_.intercept_[0]) / n
+        frames = []
+        for col, b in coef.items():
+            t = self.binner_.bins_[col].table.copy()
+            t.insert(0, "characteristic", col)
+            t["points"] = (-scaling.factor * b * t["woe"] + base).round(1)
+            frames.append(t)
+        return pd.concat(frames, ignore_index=True)
+
+    def reason_codes(
+        self, X: pd.DataFrame, scaling: ScoreScaling, top_k: int = 4
+    ) -> list[list[str]]:
+        """Adverse-action style reasons: characteristics furthest below their best points."""
+        pts = self.points(X, scaling)
+        table = self.points_table(scaling)
+        best = table.groupby("characteristic")["points"].max()
+        shortfall = best[pts.columns].to_numpy()[None, :] - pts.to_numpy()
+        out = []
+        for row in shortfall:
+            order = np.argsort(-row)[:top_k]
+            out.append([pts.columns[i] for i in order if row[i] > 0.5])
+        return out
