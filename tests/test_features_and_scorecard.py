@@ -62,3 +62,67 @@ def test_preprocessor_keeps_names(splits):
     assert isinstance(out, pd.DataFrame) and "total_past_due" in out.columns
     assert len(out) == len(splits["valid"])
 
+
+def test_woe_binning_is_monotonic_with_missing_bin(splits):
+    X = make_preprocessor().fit_transform(splits["train"][FEATURES])
+    y = splits["train"][TARGET]
+    binner = WoEBinner(max_bins=8, min_bin_share=0.05).fit(X, y)
+    for col in ("revolving_utilization", "age", "monthly_income"):
+        rates = binner.bins_[col].table.query("bin != 'missing'")["bad_rate"].to_numpy()
+        diffs = np.diff(rates)
+        assert (diffs >= -1e-12).all() or (diffs <= 1e-12).all(), col
+    assert "missing" in set(binner.bins_["monthly_income"].table["bin"])
+    assert binner.iv_["revolving_utilization"] > binner.iv_["dependents"]
+    W = binner.transform(X)
+    assert not W.isna().any().any()
+
+
+def test_woe_min_iv_selection():
+    X = pd.DataFrame({"noise": np.random.default_rng(0).normal(size=500)})
+    y = np.random.default_rng(1).integers(0, 2, 500)
+    with pytest.raises(ValueError):
+        WoEBinner(min_iv=0.5).fit(X, y)
+
+
+def test_score_scaling():
+    s = ScoreScaling(pdo=20, base_score=600, base_odds=50)
+    assert s.score_from_pd(np.array([1 / 51]))[0] == pytest.approx(600)
+    # doubling the good:bad odds adds exactly PDO points
+    assert s.score_from_pd(np.array([1 / 101]))[0] == pytest.approx(620)
+    p = np.array([0.01, 0.1, 0.5])
+    assert s.pd_from_score(s.score_from_pd(p)) == pytest.approx(p)
+
+
+def test_scorecard_points_sum_to_score(splits):
+    pipe = build_model("scorecard").fit(splits["train"][FEATURES], splits["train"][TARGET])
+    model: ScorecardModel = pipe.named_steps["model"]
+    X = pipe.named_steps["prep"].transform(splits["valid"][FEATURES].head(50))
+    scaling = ScoreScaling()
+    from_points = model.credit_score(X, scaling)
+    from_pd = scaling.score_from_pd(model.predict_proba(X)[:, 1])
+    np.testing.assert_allclose(from_points, from_pd, atol=1e-6)
+    table = model.points_table(scaling)
+    assert set(table["characteristic"]) == set(model.binner_.selected_)
+
+
+def test_reason_codes_name_weak_characteristics(splits):
+    pipe = build_model("scorecard").fit(splits["train"][FEATURES], splits["train"][TARGET])
+    model = pipe.named_steps["model"]
+    risky = row(revolving_utilization=0.99, late_90=3, late_30_59=4, age=23)
+    codes = model.reason_codes(pipe.named_steps["prep"].transform(risky), ScoreScaling())[0]
+    assert "revolving_utilization" in codes
+    assert len(codes) <= 4
+
+
+@pytest.mark.parametrize("name", ["scorecard", "logistic", "hgb", "lightgbm"])
+def test_all_candidates_fit(splits, name):
+    if name == "lightgbm":
+        pytest.importorskip("lightgbm")
+    pipe = build_model(name).fit(splits["train"][FEATURES], splits["train"][TARGET])
+    p = pipe.predict_proba(splits["valid"][FEATURES])[:, 1]
+    assert p.shape == (len(splits["valid"]),) and ((p > 0) & (p < 1)).all()
+
+
+def test_unknown_candidate():
+    with pytest.raises(ValueError):
+        build_model("svm")
