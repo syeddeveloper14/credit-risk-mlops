@@ -30,3 +30,35 @@ def psi(expected: np.ndarray, actual: np.ndarray, n_bins: int = 10, eps: float =
     e = np.bincount(np.searchsorted(edges, expected, side="right"), minlength=len(edges) + 1) / len(
         expected
     )
+    a = np.bincount(np.searchsorted(edges, actual, side="right"), minlength=len(edges) + 1) / len(
+        actual
+    )
+    e, a = np.clip(e, eps, None), np.clip(a, eps, None)
+    return float(np.sum((a - e) * np.log(a / e)))
+
+
+def classification_metrics(y: np.ndarray, p: np.ndarray) -> dict[str, float]:
+    y, p = np.asarray(y), np.asarray(p)
+    auc = roc_auc_score(y, p)
+    return {
+        "roc_auc": float(auc),
+        "gini": float(2 * auc - 1),
+        "ks": ks_statistic(y, p),
+        "pr_auc": float(average_precision_score(y, p)),
+        "brier": float(brier_score_loss(y, p)),
+        "log_loss": float(log_loss(y, np.clip(p, 1e-9, 1 - 1e-9))),
+        "ece": expected_calibration_error(y, p),
+        "default_rate": float(y.mean()),
+        "mean_pd": float(p.mean()),
+    }
+
+
+def decile_table(y: np.ndarray, p: np.ndarray, n_bins: int = 10) -> pd.DataFrame:
+    """Risk-ranked deciles (1 = riskiest) with bad rate, lift and cumulative capture."""
+    frame = pd.DataFrame({"y": np.asarray(y), "p": np.asarray(p)}).sort_values("p", ascending=False)
+    frame["decile"] = np.arange(len(frame)) * n_bins // len(frame) + 1
+    t = frame.groupby("decile").agg(n=("y", "size"), bads=("y", "sum"), mean_pd=("p", "mean"))
+    t["bad_rate"] = t["bads"] / t["n"]
+    t["lift"] = t["bad_rate"] / frame["y"].mean()
+    t["cum_bad_capture"] = t["bads"].cumsum() / frame["y"].sum()
+    return t
