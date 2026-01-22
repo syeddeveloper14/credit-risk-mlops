@@ -91,3 +91,97 @@ class LocalTracker:
             self._write("meta.json", meta)
             self._run_dir, self._run_id = None, None
 
+    def log_params(self, params: dict[str, Any]) -> None:
+        flat: dict[str, Any] = {}
+        _flatten("", params, flat)
+        self._write("params.json", {**self._read("params.json"), **flat})
+
+    def log_metrics(self, metrics: dict[str, float], step: int | None = None) -> None:
+        current = self._read("metrics.json")
+        current.update({k: float(v) for k, v in metrics.items()})
+        self._write("metrics.json", current)
+        with open(self._run_dir / "metrics_history.jsonl", "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"step": step, "time": _now(), **metrics}, default=float) + "\n")
+
+    def log_artifact(self, path: str | Path) -> None:
+        path = Path(path)
+        target = self._run_dir / "artifacts" / path.name
+        if path.is_dir():
+            shutil.copytree(path, target, dirs_exist_ok=True)
+        else:
+            shutil.copy2(path, target)
+
+    def list_runs(self) -> pd.DataFrame:
+        rows = []
+        for run in sorted(self.root.iterdir()):
+            if not (run / "meta.json").exists():
+                continue
+            meta = json.loads((run / "meta.json").read_text())
+            metrics = (
+                json.loads((run / "metrics.json").read_text())
+                if (run / "metrics.json").exists()
+                else {}
+            )
+            params = (
+                json.loads((run / "params.json").read_text())
+                if (run / "params.json").exists()
+                else {}
+            )
+            rows.append(
+                {
+                    "run_id": meta["run_id"],
+                    "name": meta["name"],
+                    "status": meta["status"],
+                    "start": meta["start"],
+                    "_order": meta.get("start_ns", 0),
+                    **{f"metric.{k}": v for k, v in metrics.items()},
+                    **{f"param.{k}": v for k, v in params.items()},
+                }
+            )
+        if not rows:
+            return pd.DataFrame()
+        return (
+            pd.DataFrame(rows).sort_values("_order").drop(columns="_order").reset_index(drop=True)
+        )
+
+
+class MLflowTracker:
+    def __init__(self, uri: str, experiment: str) -> None:
+        try:
+            import mlflow
+        except ImportError as exc:  # pragma: no cover - optional dependency
+            raise ImportError("pip install 'credit-risk-mlops[mlflow]'") from exc
+        self._mlflow = mlflow
+        mlflow.set_tracking_uri(uri)
+        mlflow.set_experiment(experiment)
+
+    @property
+    def run_id(self) -> str | None:
+        run = self._mlflow.active_run()
+        return run.info.run_id if run else None
+
+    @contextmanager
+    def start_run(self, name: str, tags: dict[str, str] | None = None):  # pragma: no cover
+        with self._mlflow.start_run(run_name=name, tags=tags):
+            yield self
+
+    def log_params(self, params: dict[str, Any]) -> None:  # pragma: no cover
+        flat: dict[str, Any] = {}
+        _flatten("", params, flat)
+        self._mlflow.log_params(flat)
+
+    def log_metrics(
+        self, metrics: dict[str, float], step: int | None = None
+    ) -> None:  # pragma: no cover
+        self._mlflow.log_metrics({k: float(v) for k, v in metrics.items()}, step=step)
+
+    def log_artifact(self, path: str | Path) -> None:  # pragma: no cover
+        self._mlflow.log_artifact(str(path))
+
+
+def make_tracker(cfg: TrackingConfig, root: str | Path = ".") -> LocalTracker | MLflowTracker:
+    if cfg.backend == "local":
+        return LocalTracker(Path(root) / cfg.uri, cfg.experiment)
+    if cfg.backend == "mlflow":
+        return MLflowTracker(cfg.uri, cfg.experiment)
+    raise ValueError(f"Unknown tracking backend {cfg.backend!r}")
