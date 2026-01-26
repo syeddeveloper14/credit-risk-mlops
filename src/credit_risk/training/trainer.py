@@ -56,3 +56,62 @@ class TrainingOutcome:
                     "hpo": c.backend,
                     "seconds": c.seconds,
                 }
+                for c in self.candidates
+            ]
+        ).sort_values("valid_roc_auc", ascending=False)
+
+
+def train_and_select(
+    cfg: Config, train: pd.DataFrame, valid: pd.DataFrame, tracker: Tracker
+) -> TrainingOutcome:
+    X_train, y_train = train[FEATURES], train[TARGET]
+    X_valid, y_valid = valid[FEATURES], valid[TARGET]
+    results: list[CandidateResult] = []
+
+    for name in cfg.models.candidates:
+        start = time.monotonic()
+        with tracker.start_run(f"candidate-{name}", tags={"stage": "train", "model": name}):
+            tuning = tune(
+                name,
+                X_train,
+                y_train,
+                n_trials=cfg.hpo.n_trials,
+                cv_folds=cfg.hpo.cv_folds,
+                seed=cfg.hpo.seed,
+                timeout_s=cfg.hpo.timeout_s,
+            )
+            model = build_model(name, tuning.best_params, cfg.seed).fit(X_train, y_train)
+            metrics = classification_metrics(y_valid, model.predict_proba(X_valid)[:, 1])
+            tracker.log_params({"model": name, "hpo_backend": tuning.backend, **tuning.best_params})
+            tracker.log_metrics(
+                {"cv_auc": tuning.best_score, **{f"valid_{k}": v for k, v in metrics.items()}}
+            )
+            run_id = tracker.run_id
+        seconds = time.monotonic() - start
+        log.info(
+            "%-10s cv_auc=%.4f valid_auc=%.4f (%.1fs)",
+            name,
+            tuning.best_score,
+            metrics["roc_auc"],
+            seconds,
+        )
+        results.append(
+            CandidateResult(
+                name,
+                tuning.best_params,
+                tuning.best_score,
+                metrics,
+                tuning.backend,
+                seconds,
+                run_id,
+            )
+        )
+
+    key = cfg.models.selection_metric
+    best = max(results, key=lambda r: r.valid_metrics[key])
+    full = pd.concat([train, valid])
+    with tracker.start_run(f"final-{best.name}", tags={"stage": "final", "model": best.name}):
+        model = build_model(best.name, best.params, cfg.seed).fit(full[FEATURES], full[TARGET])
+        tracker.log_params({"model": best.name, **best.params, "train_rows": len(full)})
+        tracker.log_metrics({f"selected_valid_{key}": best.valid_metrics[key]})
+    return TrainingOutcome(best=best, candidates=results, model=model)
