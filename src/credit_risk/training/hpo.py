@@ -73,3 +73,78 @@ def cv_auc(
     y: pd.Series,
     folds: int,
     seed: int,
+    report: Callable[[int, float], None] | None = None,
+) -> float:
+    splitter = StratifiedKFold(n_splits=folds, shuffle=True, random_state=seed)
+    scores = []
+    for i, (tr, va) in enumerate(splitter.split(X, y)):
+        model = build_model(name, params, seed).fit(X.iloc[tr], y.iloc[tr])
+        scores.append(roc_auc_score(y.iloc[va], model.predict_proba(X.iloc[va])[:, 1]))
+        if report is not None:
+            report(i, float(np.mean(scores)))
+    return float(np.mean(scores))
+
+
+def tune(
+    name: str,
+    X: pd.DataFrame,
+    y: pd.Series,
+    n_trials: int = 25,
+    cv_folds: int = 3,
+    seed: int = 42,
+    timeout_s: int | None = None,
+    backend: str = "auto",
+) -> TuningResult:
+    space = SEARCH_SPACES[name]
+    defaults = DEFAULT_PARAMS[name]
+    if n_trials <= 1 or not space:
+        score = cv_auc(name, defaults, X, y, cv_folds, seed)
+        return TuningResult(name, dict(defaults), score, "defaults")
+
+    use_optuna = backend in ("auto", "optuna")
+    if use_optuna:
+        try:
+            import optuna
+        except ImportError:
+            if backend == "optuna":
+                raise
+            use_optuna = False
+
+    if use_optuna:
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        study = optuna.create_study(
+            direction="maximize",
+            sampler=optuna.samplers.TPESampler(seed=seed),
+            pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=1),
+        )
+        study.enqueue_trial(defaults)
+
+        def objective(trial) -> float:
+            params = _suggest(trial, space)
+
+            def report(step: int, value: float) -> None:
+                trial.report(value, step)
+                if trial.should_prune():
+                    raise optuna.TrialPruned()
+
+            return cv_auc(name, params, X, y, cv_folds, seed, report)
+
+        study.optimize(objective, n_trials=n_trials, timeout=timeout_s)
+        history = study.trials_dataframe(attrs=("number", "value", "params", "state"))
+        return TuningResult(
+            name, dict(study.best_params), float(study.best_value), "optuna", history
+        )
+
+    rng = np.random.default_rng(seed)
+    rows, best_params, best_score = [], dict(defaults), -np.inf
+    start = time.monotonic()
+    for i in range(n_trials):
+        params = dict(defaults) if i == 0 else _sample_random(space, rng)
+        score = cv_auc(name, params, X, y, cv_folds, seed)
+        rows.append({"number": i, "value": score, **{f"params_{k}": v for k, v in params.items()}})
+        if score > best_score:
+            best_params, best_score = params, score
+        if timeout_s is not None and time.monotonic() - start > timeout_s:
+            log.info("HPO timeout after %d trials", i + 1)
+            break
+    return TuningResult(name, best_params, float(best_score), "random", pd.DataFrame(rows))
