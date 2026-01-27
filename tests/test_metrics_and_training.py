@@ -36,3 +36,41 @@ def test_psi():
     a = rng.normal(size=10_000)
     assert psi(a, rng.normal(size=10_000)) < 0.02
     assert psi(a, rng.normal(1.0, 1.0, size=10_000)) > 0.25
+
+
+def test_decile_table():
+    rng = np.random.default_rng(1)
+    p = rng.random(1000)
+    y = (rng.random(1000) < p).astype(int)
+    t = decile_table(y, p)
+    assert len(t) == 10 and t["cum_bad_capture"].iloc[-1] == pytest.approx(1.0)
+    assert t["bad_rate"].iloc[0] > t["bad_rate"].iloc[-1]
+
+
+def test_fairness_slices():
+    age = pd.Series([25] * 400 + [50] * 400 + [70] * 400)
+    rng = np.random.default_rng(2)
+    p = np.r_[rng.uniform(0.1, 0.4, 400), rng.uniform(0, 0.1, 400), rng.uniform(0, 0.1, 400)]
+    y = (rng.random(1200) < p).astype(int)
+    table = slice_metrics(age, y, p, decline_above_pd=0.2)
+    assert list(table.index) == ["<30", "45-61", "62+"]
+    summary = fairness_summary(table)
+    assert summary["approval_ratio"] < 0.8  # young band is approved far less often
+
+
+def test_tuning_never_worse_than_defaults(splits):
+    X, y = splits["train"][FEATURES], splits["train"][TARGET]
+    default_score = cv_auc("logistic", DEFAULT_PARAMS["logistic"], X, y, folds=2, seed=0)
+    for backend in ("random", "optuna"):
+        if backend == "optuna":
+            pytest.importorskip("optuna")
+        result = tune("logistic", X, y, n_trials=4, cv_folds=2, seed=0, backend=backend)
+        assert result.backend == backend
+        assert result.best_score >= default_score - 1e-12
+        assert len(result.history) >= 1
+
+
+def test_tuning_with_one_trial_returns_defaults(splits):
+    X, y = splits["train"][FEATURES], splits["train"][TARGET]
+    result = tune("scorecard", X, y, n_trials=1, cv_folds=2)
+    assert result.backend == "defaults" and result.best_params == DEFAULT_PARAMS["scorecard"]
