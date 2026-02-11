@@ -160,3 +160,166 @@ def stage_evaluate(ctx: Context) -> dict:
         pts = estimator.points_table(scaling)
         pts.to_csv(ctx.path("reports", "scorecard_points.csv"), index=False)
         extra = (
+            "\n## Scorecard\n\nInformation value by characteristic:\n\n"
+            + _md_table(
+                estimator.binner_.iv_table()[["iv", "selected", "strength"]].astype(
+                    {"strength": str}
+                )
+            )
+            + "\n\nFull points table: `reports/scorecard_points.csv`.\n"
+        )
+
+    report = (
+        f"""# Evaluation report
+
+Selected model: **{training["selected_model"]}** (by validation {cfg.models.selection_metric}).
+
+## Candidate leaderboard (validation split)
+
+{_md_table(board)}
+
+## Test-set metrics
+
+| metric | value |
+|---|---|
+"""
+        + "\n".join(f"| {k} | {v:.4f} |" for k, v in metrics.items())
+        + f"""
+
+## Risk deciles (1 = riskiest)
+
+{_md_table(tables["deciles"])}
+
+## Age-band slices
+
+{_md_table(tables["age_slices"])}
+
+![ROC](figures/roc.png) ![Calibration](figures/calibration.png) ![Scores](figures/scores.png)
+{extra}"""
+    )
+    ctx.path("reports", "evaluation.md").write_text(report, encoding="utf-8")
+    return {k: metrics[k] for k in ("roc_auc", "ks", "ece", "score_psi")}
+
+
+def stage_register(ctx: Context) -> dict:
+    model = joblib.load(ctx.path("artifacts", "model.joblib"))
+    metrics = json.loads(ctx.path("reports", "evaluation.json").read_text())
+    training = json.loads(ctx.path("reports", "training.json").read_text())
+    train = pd.concat([_read_split(ctx, "train"), _read_split(ctx, "valid")])
+    scores = model.predict_proba(train[FEATURES])[:, 1]
+    reference = build_reference(train[FEATURES], scores)
+    reference["goods_median"] = train.loc[train[TARGET] == 0, FEATURES].median().to_dict()
+    with ctx.tracker.start_run("register", tags={"stage": "register"}):
+        ctx.tracker.log_metrics({f"test_{k}": v for k, v in metrics.items()})
+        run_id = ctx.tracker.run_id
+    mv = ctx.registry.register(
+        model,
+        model_type=training["selected_model"],
+        metrics=metrics,
+        params=training["params"],
+        signature=FEATURES,
+        reference=reference,
+        run_id=run_id,
+        tags={"package_version": __version__},
+    )
+    _write_json(ctx.path("reports", "registered.json"), {"version": mv.version, "name": mv.name})
+    return {"version": mv.version}
+
+
+def stage_promote(ctx: Context) -> dict:
+    registered = json.loads(ctx.path("reports", "registered.json").read_text())
+    challenger = ctx.registry.get(registered["version"])
+    if challenger.stage == "Production":
+        result = {"version": challenger.version, "promote": False, "note": "already in Production"}
+        _write_json(ctx.path("reports", "promotion.json"), result)
+        return result
+
+    champion = ctx.registry.latest("Production")
+    champion_metrics = None
+    if champion is not None:
+        # Re-score the champion on the current test set: same data for both models.
+        train = pd.concat([_read_split(ctx, "train"), _read_split(ctx, "valid")])
+        test = _read_split(ctx, "test")
+        champion_metrics, _ = evaluate_model(
+            ctx.registry.load_model(champion.version), train, test, ctx.cfg
+        )
+
+    decision = decide_promotion(challenger.metrics, champion_metrics, ctx.cfg.promotion)
+    log.info("\n%s", decision.summary())
+    if decision.promote:
+        ctx.registry.transition(challenger.version, "Production", note="passed promotion gates")
+    else:
+        ctx.registry.transition(challenger.version, "Staging", note="failed promotion gates")
+    result = {
+        "version": challenger.version,
+        "champion_version": champion.version if champion else None,
+        **decision.to_dict(),
+    }
+    _write_json(ctx.path("reports", "promotion.json"), result)
+    return {"version": challenger.version, "promote": decision.promote}
+
+
+def build_stages(ctx: Context) -> list[Stage]:
+    r = ctx.rel
+    split_files = [r("processed", f"{s}.csv") for s in SPLITS]
+    return [
+        Stage(
+            "ingest",
+            stage_ingest,
+            outputs=[r("interim", DATASET)],
+            params=lambda c: c.cfg.section("data"),
+        ),
+        Stage(
+            "validate",
+            stage_validate,
+            deps=["ingest"],
+            inputs=[r("interim", DATASET)],
+            outputs=[r("reports", "validation.json")],
+            params=lambda c: c.cfg.section("validation"),
+        ),
+        Stage(
+            "split",
+            stage_split,
+            deps=["validate"],
+            inputs=[r("interim", DATASET)],
+            outputs=split_files,
+            params=lambda c: c.cfg.section("split"),
+        ),
+        Stage(
+            "train",
+            stage_train,
+            deps=["split"],
+            inputs=split_files[:2],
+            outputs=[r("artifacts", "model.joblib"), r("reports", "training.json")],
+            params=lambda c: {
+                "hpo": c.cfg.section("hpo"),
+                "models": c.cfg.section("models"),
+                "seed": c.cfg.seed,
+            },
+        ),
+        Stage(
+            "evaluate",
+            stage_evaluate,
+            deps=["train"],
+            inputs=[r("artifacts", "model.joblib"), *split_files],
+            outputs=[r("reports", "evaluation.json"), r("reports", "evaluation.md")],
+            params=lambda c: c.cfg.section("scoring"),
+        ),
+        Stage(
+            "register",
+            stage_register,
+            deps=["evaluate"],
+            inputs=[r("artifacts", "model.joblib"), r("reports", "evaluation.json")],
+            outputs=[r("reports", "registered.json")],
+            params=lambda c: c.cfg.section("registry"),
+        ),
+        Stage(
+            "promote",
+            stage_promote,
+            deps=["register"],
+            inputs=[r("reports", "registered.json")],
+            outputs=[r("reports", "promotion.json")],
+            params=lambda c: c.cfg.section("promotion"),
+            cacheable=False,
+        ),
+    ]
