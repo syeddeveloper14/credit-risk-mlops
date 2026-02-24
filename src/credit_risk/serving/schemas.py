@@ -27,3 +27,32 @@ class ApplicantIn(BaseModel):
                     "debt_ratio": 0.80,
                     "monthly_income": 9120,
                     "open_credit_lines": 13,
+                    "late_90": 0,
+                    "real_estate_loans": 6,
+                    "late_60_89": 0,
+                    "dependents": 2,
+                }
+            ]
+        }
+    }
+
+
+class Reason(BaseModel):
+    code: str
+    text: str
+
+
+class PredictionOut(BaseModel):
+    applicant_id: int | None
+    probability_of_default: float
+    credit_score: int
+    decision: str
+    reasons: list[Reason]
+    model_version: str
+
+
+class ModelInfo(BaseModel):
+    model_version: str
+    model_type: str
+    stage: str
+    metrics: dict[str, float]
