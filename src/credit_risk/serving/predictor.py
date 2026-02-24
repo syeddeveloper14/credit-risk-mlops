@@ -69,3 +69,75 @@ class CreditRiskPredictor:
         if mv is None:
             raise LookupError(f"No model in stage {stage!r}; run the pipeline first")
         model = registry.load_model(mv.version)
+        goods = mv.reference.get("goods_median", {})
+        return cls(model, scoring, f"{mv.name}:v{mv.version}", goods, log_path)
+
+    @property
+    def estimator(self):
+        return self.model.named_steps["model"]
+
+    def decisions(self, pd_bad: np.ndarray) -> np.ndarray:
+        s = self.scoring
+        return np.where(
+            pd_bad >= s.decline_above_pd,
+            "decline",
+            np.where(pd_bad < s.approve_below_pd, "approve", "refer"),
+        )
+
+    def _reasons(self, X: pd.DataFrame, pd_bad: np.ndarray, top_k: int = 4) -> list[list[str]]:
+        if isinstance(self.estimator, ScorecardModel):
+            prepped = self.model.named_steps["prep"].transform(X)
+            return self.estimator.reason_codes(prepped, self.scaling, top_k)
+        # Model-agnostic fallback: replace each raw input with the median of good applicants
+        # and keep the inputs whose replacement lowers PD the most.
+        features = [f for f in FEATURES if f in self.reference_goods]
+        impacts = np.zeros((len(X), len(features)))
+        for j, f in enumerate(features):
+            X_alt = X.copy()
+            X_alt[f] = self.reference_goods[f]
+            impacts[:, j] = pd_bad - self.model.predict_proba(X_alt)[:, 1]
+        out = []
+        for row in impacts:
+            order = np.argsort(-row)[:top_k]
+            out.append([features[i] for i in order if row[i] > 0.001])
+        return out
+
+    def predict(self, df: pd.DataFrame, with_reasons: bool = True) -> pd.DataFrame:
+        X = df[FEATURES].astype(float)
+        pd_bad = self.model.predict_proba(X)[:, 1]
+        decision = self.decisions(pd_bad)
+        out = pd.DataFrame(
+            {
+                "probability_of_default": pd_bad,
+                "credit_score": np.round(self.scaling.score_from_pd(pd_bad)).astype(int),
+                "decision": decision,
+            },
+            index=df.index,
+        )
+        if ID in df.columns:
+            out.insert(0, ID, df[ID].to_numpy())
+        if with_reasons:
+            reasons = self._reasons(X, pd_bad)
+            # Reasons are only meaningful (and legally required) for non-approved applicants.
+            out["reasons"] = [
+                r if d != "approve" else [] for r, d in zip(reasons, decision, strict=True)
+            ]
+        out["model_version"] = self.version
+        if self.log_path is not None:
+            self._log(df, out)
+        return out
+
+    def _log(self, inputs: pd.DataFrame, outputs: pd.DataFrame) -> None:
+        """Append predictions to a JSONL log: the raw material for monitoring."""
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with open(self.log_path, "a", encoding="utf-8") as fh:
+            for (_, x), (_, y) in zip(inputs[FEATURES].iterrows(), outputs.iterrows(), strict=True):
+                record: dict[str, Any] = {
+                    "time": now,
+                    "model_version": self.version,
+                    "inputs": {k: (None if pd.isna(v) else float(v)) for k, v in x.items()},
+                    "probability_of_default": float(y["probability_of_default"]),
+                    "decision": y["decision"],
+                }
+                fh.write(json.dumps(record) + "\n")
