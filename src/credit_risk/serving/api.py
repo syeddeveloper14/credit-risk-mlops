@@ -45,3 +45,27 @@ def create_app(predictor: CreditRiskPredictor | None = None, cfg: Config | None 
     def model_info() -> ModelInfo:
         mv = registry.latest("Production")
         return ModelInfo(
+            model_version=predictor.version,
+            model_type=mv.model_type if mv else type(predictor.estimator).__name__,
+            stage=mv.stage if mv else "unregistered",
+            metrics={
+                k: float(v)
+                for k, v in (mv.metrics if mv else {}).items()
+                if isinstance(v, int | float)
+            },
+        )
+
+    @app.post("/v1/predict", response_model=PredictionOut)
+    def predict(applicant: ApplicantIn) -> PredictionOut:
+        frame = pd.DataFrame([applicant.model_dump()])
+        return _to_out(predictor.predict(frame).iloc[0])
+
+    @app.post("/v1/predict/batch", response_model=list[PredictionOut])
+    def predict_batch(applicants: list[ApplicantIn]) -> list[PredictionOut]:
+        if not applicants:
+            return []
+        frame = pd.DataFrame([a.model_dump() for a in applicants])
+        result = predictor.predict(frame)
+        return [_to_out(row) for _, row in result.iterrows()]
+
+    return app
