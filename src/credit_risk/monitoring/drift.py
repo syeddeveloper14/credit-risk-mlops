@@ -42,3 +42,48 @@ def _psi(expected: np.ndarray, actual: np.ndarray) -> float:
 
 def build_reference(X: pd.DataFrame, scores: np.ndarray, n_bins: int = 10) -> dict[str, Any]:
     return {
+        "n": int(len(X)),
+        "features": {c: _profile_column(X[c].to_numpy(dtype=float), n_bins) for c in X.columns},
+        "score": _profile_column(np.asarray(scores, dtype=float), n_bins),
+    }
+
+
+def drift_report(
+    reference: dict[str, Any],
+    X: pd.DataFrame,
+    scores: np.ndarray | None = None,
+    warn: float = 0.1,
+    alert: float = 0.25,
+) -> pd.DataFrame:
+    rows = []
+    items = list(reference["features"].items())
+    if scores is not None:
+        items.append(("__score__", reference["score"]))
+    for name, ref in items:
+        values = np.asarray(scores, float) if name == "__score__" else X[name].to_numpy(dtype=float)
+        value = _psi(ref["proportions"], _proportions(values, ref["edges"]))
+        rows.append(
+            {
+                "feature": name,
+                "psi": value,
+                "status": "alert" if value >= alert else "warn" if value >= warn else "ok",
+                "missing_rate": float(np.isnan(values).mean()),
+            }
+        )
+    return pd.DataFrame(rows).sort_values("psi", ascending=False).reset_index(drop=True)
+
+
+def performance_check(
+    y: np.ndarray, p: np.ndarray, reference_auc: float, max_drop: float, min_labels: int
+) -> dict[str, Any]:
+    y = np.asarray(y)
+    if len(y) < min_labels or len(np.unique(y)) < 2:
+        return {"evaluated": False, "reason": f"need >= {min_labels} labels with both classes"}
+    auc = float(roc_auc_score(y, p))
+    return {
+        "evaluated": True,
+        "auc": auc,
+        "reference_auc": reference_auc,
+        "auc_drop": reference_auc - auc,
+        "degraded": reference_auc - auc > max_drop,
+    }
