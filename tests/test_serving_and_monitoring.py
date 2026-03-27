@@ -55,3 +55,60 @@ def test_model_agnostic_reasons(production, splits):
 
     hgb = build_model("hgb").fit(splits["train"][FEATURES], splits["train"]["serious_dlq_2yrs"])
     predictor = CreditRiskPredictor(hgb, cfg.scoring, "hgb-test", mv.reference["goods_median"])
+    import pandas as pd
+
+    out = predictor.predict(pd.DataFrame([APPLICANT]))
+    assert out["decision"].iloc[0] != "approve"
+    assert len(out["reasons"].iloc[0]) > 0
+
+
+def test_api(production, tmp_path):
+    cfg, registry, mv = production
+    client = TestClient(create_app(cfg=cfg))
+    assert client.get("/health").json()["model_version"] == f"{mv.name}:v{mv.version}"
+    info = client.get("/model").json()
+    assert info["stage"] == "Production" and "roc_auc" in info["metrics"]
+
+    r = client.post("/v1/predict", json=APPLICANT)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["applicant_id"] == 7 and body["decision"] in {"refer", "decline"}
+    assert body["reasons"] and all(reason["text"] for reason in body["reasons"])
+
+    assert client.post("/v1/predict", json={**APPLICANT, "age": 12}).status_code == 422
+    missing_income = {**APPLICANT, "monthly_income": None, "dependents": None}
+    assert client.post("/v1/predict", json=missing_income).status_code == 200
+
+    batch = client.post(
+        "/v1/predict/batch", json=[APPLICANT, {**APPLICANT, "applicant_id": 8}]
+    ).json()
+    assert [b["applicant_id"] for b in batch] == [7, 8]
+
+    log_lines = Path(cfg.monitoring.prediction_log).read_text().strip().splitlines()
+    assert len(log_lines) >= 4
+    assert json.loads(log_lines[-1])["model_version"] == f"{mv.name}:v{mv.version}"
+
+
+def test_drift_detection(production):
+    cfg, registry, mv = production
+    model = registry.load_model(mv.version)
+    stable = to_canonical(simulate_applicants(5000, seed=11))
+    shifted = to_canonical(simulate_applicants(5000, seed=12, drift=1.5))
+    for batch, expect_retrain in ((stable, False), (shifted, True)):
+        p = model.predict_proba(batch[FEATURES])[:, 1]
+        report = drift_report(mv.reference, batch[FEATURES], p)
+        decision = retrain_decision(report)
+        assert decision.retrain is expect_retrain, decision.reasons
+    assert "__score__" in set(report["feature"])
+
+
+def test_performance_check():
+    y = np.r_[np.zeros(900), np.ones(100)]
+    p = np.r_[
+        np.random.default_rng(0).uniform(0, 0.5, 900), np.random.default_rng(1).uniform(0.3, 1, 100)
+    ]
+    ok = performance_check(y, p, reference_auc=0.80, max_drop=0.03, min_labels=500)
+    assert ok["evaluated"] and not ok["degraded"]
+    bad = performance_check(y, np.random.default_rng(2).random(1000), 0.80, 0.03, 500)
+    assert bad["degraded"]
+    assert not performance_check(y[:100], p[:100], 0.8, 0.03, 500)["evaluated"]
