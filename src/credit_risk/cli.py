@@ -140,3 +140,74 @@ def _cmd_runs(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_serve(args: argparse.Namespace) -> int:
+    import uvicorn
+
+    from .serving.api import create_app
+
+    uvicorn.run(create_app(cfg=load_config(args.config)), host=args.host, port=args.port)
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="credit-risk")
+    parser.add_argument("-v", "--verbose", action="store_true")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    def with_config(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
+        p.add_argument("--config", default="configs/pipeline.yaml")
+        return p
+
+    p = with_config(
+        sub.add_parser("run", help="run the lifecycle pipeline (cached stages are skipped)")
+    )
+    p.add_argument("--until", choices=STAGE_NAMES)
+    p.add_argument("--force", action="store_true", help="re-run every stage")
+    p.add_argument("--force-stage", action="append", choices=STAGE_NAMES, help="re-run one stage")
+    p.set_defaults(func=_cmd_run)
+
+    p = with_config(sub.add_parser("registry", help="inspect or change model stages"))
+    p.add_argument("action", choices=["list", "transition", "rollback"])
+    p.add_argument("--version", type=int)
+    p.add_argument("--stage", choices=["None", "Staging", "Production", "Archived"])
+    p.set_defaults(func=_cmd_registry)
+
+    p = with_config(sub.add_parser("score", help="batch-score a CSV with the Production model"))
+    p.add_argument("--input", required=True)
+    p.add_argument("--output", default="reports/scored.csv")
+    p.set_defaults(func=_cmd_score)
+
+    p = with_config(sub.add_parser("monitor", help="drift + performance check on a new batch"))
+    p.add_argument("--input", required=True)
+    p.add_argument("--exit-code", action="store_true", help="exit 3 when retraining is recommended")
+    p.set_defaults(func=_cmd_monitor)
+
+    p = sub.add_parser("simulate", help="write a synthetic applicant batch (optionally drifted)")
+    p.add_argument("--n", type=int, default=5000)
+    p.add_argument("--seed", type=int, default=99)
+    p.add_argument("--drift", type=float, default=0.0)
+    p.add_argument("--no-labels", action="store_true")
+    p.add_argument("--out", default="data/raw/batch.csv")
+    p.set_defaults(func=_cmd_simulate)
+
+    p = with_config(sub.add_parser("runs", help="list tracked experiment runs"))
+    p.set_defaults(func=_cmd_runs)
+
+    p = with_config(sub.add_parser("serve", help="start the prediction API"))
+    p.add_argument("--host", default="0.0.0.0")
+    p.add_argument("--port", type=int, default=8000)
+    p.set_defaults(func=_cmd_serve)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
