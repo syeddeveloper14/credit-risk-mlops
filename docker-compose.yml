@@ -1,0 +1,17 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./model_registry:/app/model_registry:ro   # run `make pipeline` first
+      - ./logs:/app/logs                          # prediction log for monitoring
+
+  mlflow:
+    profiles: ["mlflow"]                          # docker compose --profile mlflow up
+    image: ghcr.io/mlflow/mlflow:v2.16.2
+    command: mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:///mlflow/mlflow.db --default-artifact-root /mlflow/artifacts
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./mlflow:/mlflow
