@@ -102,3 +102,56 @@ curl -s localhost:8000/v1/predict -H 'content-type: application/json' -d '{
   "real_estate_loans": 0, "late_60_89": 1, "dependents": 2
 }'
 ```
+
+The response carries the probability of default, a credit score, a decision (`approve` / `refer` / `decline` from configurable PD cut-offs) and, for anything not approved, up to four reason codes with plain-language text. Reasons come from scorecard points (characteristics furthest below their best attainable points) or, for other model types, from re-scoring with each input set to the median good applicant. Every prediction is appended to `logs/predictions.jsonl` for monitoring.
+
+## Monitoring and retraining
+
+```bash
+credit-risk simulate --n 5000 --drift 1.2 --out data/raw/new_batch.csv
+credit-risk monitor --input data/raw/new_batch.csv --exit-code
+```
+
+`monitor` computes PSI for every input and for the score against the reference profile stored with the Production version, checks AUC when labels are present, and prints a retrain recommendation with reasons. With `--exit-code` it exits with status 3 when retraining is recommended, which `.github/workflows/retrain.yml` uses to trigger the pipeline on a schedule.
+
+## Experiment tracking
+
+Runs are recorded through one `Tracker` interface. The default backend writes JSON files (`mlruns_local/`), which needs no server and works in CI. Set `tracking.backend: mlflow` and `tracking.uri` to send the same runs to MLflow; `docker compose --profile mlflow up` starts a local MLflow server.
+
+```bash
+credit-risk runs                       # leaderboard of tracked runs
+credit-risk registry list              # versions and stages
+credit-risk registry rollback          # restore the previous Production version
+```
+
+## Project structure
+
+```
+credit-risk-mlops/
+├── configs/pipeline.yaml        # every knob in one place
+├── docs/
+│   ├── lifecycle.md             # stage contracts, caching, reproducibility
+│   └── model_governance.md      # gates, fairness slices, reason codes, limitations
+├── src/credit_risk/
+│   ├── data/                    # schema, ingest, synthetic data, contract validation, split
+│   ├── features/                # sklearn transformers, WoE binning
+│   ├── models/                  # scorecard, candidate factory and search spaces
+│   ├── training/                # Optuna / random search, candidate selection
+│   ├── evaluation/              # metrics, fairness slices, plots
+│   ├── tracking/                # local JSON tracker, MLflow adapter
+│   ├── registry/                # versioned registry, promotion gates
+│   ├── serving/                 # predictor, FastAPI app
+│   ├── monitoring/              # PSI drift, performance decay, retrain policy
+│   ├── pipeline/                # cached DAG runner + stage definitions
+│   └── cli.py                   # `credit-risk`
+├── tests/                       # 44 tests incl. full pipeline runs in temp dirs
+├── .github/workflows/
+│   ├── ci.yml                   # lint + tests on every push
+│   └── retrain.yml              # scheduled monitor -> retrain
+├── Dockerfile
+└── docker-compose.yml
+```
+
+## License
+
+MIT, see [LICENSE](LICENSE).
